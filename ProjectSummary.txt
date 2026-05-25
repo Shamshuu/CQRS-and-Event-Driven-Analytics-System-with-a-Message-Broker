@@ -1,0 +1,44 @@
+1. What This Project Does & Its Purpose
+This project is the backend for a high-performance e-commerce analytics system.
+
+The Purpose: In traditional monolithic applications, you use a single database to handle both "writes" (creating orders, updating stock) and "reads" (fetching complex analytics). As an e-commerce platform grows, heavy analytical queries (like calculating total revenue per category) can lock up the database, slowing down users who are trying to simply checkout and place an order.
+
+This project solves that problem by implementing CQRS (Command Query Responsibility Segregation). CQRS fundamentally separates the system into two isolated halves:
+
+The Write Side (Command): Optimized purely for speed, validation, and safely recording incoming transactions (orders).
+
+The Read Side (Query): Optimized purely for fast data retrieval, using pre-calculated analytics tables called "Materialized Views."
+
+
+2. How Each Functionality is Implemented
+A. The Write Path (Command Service)
+When a user places an order, the request hits the Command Service.
+
+Implementation: It opens a single database transaction. It verifies if there is enough stock, inserts the order into the database, deducts the inventory, and finally writes an OrderCreated event into a special outbox table. If any step fails, the entire transaction rolls back, ensuring data integrity.
+
+B. The Event Bus (The Outbox Pattern)
+We need to send the OrderCreated event to the Read Side, but what if the network goes down right as the order is placed?
+
+Implementation: We use the Transactional Outbox Pattern. A background "poller" process constantly watches the outbox table. When it sees a new event, it publishes it to our message broker (RabbitMQ) and marks it as "published." This guarantees that no events are ever lost.
+
+C. The Update Path (Consumer Service)
+The Read Side needs to update its analytics whenever a new order happens.
+
+Implementation: The Consumer Service constantly listens to RabbitMQ. When an OrderCreated event arrives, it updates the Materialized Views (e.g., adding to the total_revenue of a specific category).
+Idempotency: RabbitMQ might occasionally deliver the same message twice. The Consumer Service prevents double-counting by storing the eventId in a processed_events table. If it sees an ID it has already processed, it safely ignores it.
+
+D. The Read Path (Query Service)
+When an admin wants to see a dashboard of analytics, the request hits the Query Service.
+
+Implementation: Because the Consumer Service has already done the heavy lifting of calculating the math (pre-aggregating the data into Materialized Views), the Query Service just performs a lightning-fast SELECT * query. No complex SQL JOINs or math are required at read-time.
+
+3. How Each Technology Helps
+PostgreSQL (Write Database): Relational databases are perfect for the Write Side because of ACID transactions. It ensures that if an order is placed, the stock is strictly deducted and the outbox event is strictly saved at the exact same millisecond.
+
+PostgreSQL (Read Database): We use a second, completely separate instance of Postgres. It holds our "Materialized Views" (tables like product_sales_view). If this database crashes, the Write DB is unaffected, and customers can still place orders.
+
+RabbitMQ (Message Broker): Acts as the asynchronous "glue" between the Write and Read sides. It holds the events in queues until the Consumer Service is ready to process them. If the Consumer Service crashes, RabbitMQ simply holds onto the messages until the service comes back online.
+
+Node.js & Express: Used to build the microservices. Node's non-blocking, asynchronous nature makes it incredibly efficient at handling high volumes of HTTP requests and message queue polling simultaneously.
+
+Docker & Docker Compose: Orchestrates the entire architecture. Instead of manually installing Node, RabbitMQ, and two Postgres databases on your computer, Docker containerizes them into isolated environments, allowing you to spin up the entire 6-service architecture with a single docker-compose up command.
